@@ -2,7 +2,7 @@ import torch
 
 from typing import List, Optional, Tuple
 from pytorch3d.renderer.cameras import CamerasBase
-
+import pdb
 
 # Volume renderer which integrates color and density along rays
 # according to the equations defined in [Mildenhall et al. 2020]
@@ -23,8 +23,16 @@ class VolumeRenderer(torch.nn.Module):
         eps: float = 1e-10
     ):
         # TODO (1.5): Compute transmittance using the equation described in the README
-        pass
+        weights = []
+        T = torch.ones(deltas.shape[0]).to(deltas.device)
+        weights.append(T)
+        for i in range(deltas.shape[1]-1):
+            T = T*torch.exp(-deltas[:,i,0]*rays_density[:,i,0])
+            weights.append(T)
+        weights = torch.vstack(weights).transpose(1,0)
+        # M N
 
+        weights = weights*(1 - torch.exp(-deltas[...,0]*rays_density[...,0]))
         # TODO (1.5): Compute weight used for rendering from transmittance and alpha
         return weights
     
@@ -34,9 +42,10 @@ class VolumeRenderer(torch.nn.Module):
         rays_feature: torch.Tensor
     ):
         # TODO (1.5): Aggregate (weighted sum of) features using weights
-        pass
+        feature = weights * rays_feature
 
-        return feature
+
+        return feature.sum(dim=1)
 
     def forward(
         self,
@@ -45,13 +54,11 @@ class VolumeRenderer(torch.nn.Module):
         ray_bundle,
     ):
         B = ray_bundle.shape[0]
-
         # Process the chunks of rays.
         chunk_outputs = []
 
         for chunk_start in range(0, B, self._chunk_size):
             cur_ray_bundle = ray_bundle[chunk_start:chunk_start+self._chunk_size]
-
             # Sample points along the ray
             cur_ray_bundle = sampler(cur_ray_bundle)
             n_pts = cur_ray_bundle.sample_shape[1]
@@ -60,7 +67,6 @@ class VolumeRenderer(torch.nn.Module):
             implicit_output = implicit_fn(cur_ray_bundle)
             density = implicit_output['density']
             feature = implicit_output['feature']
-
             # Compute length of each ray segment
             depth_values = cur_ray_bundle.sample_lengths[..., 0]
             deltas = torch.cat(
@@ -78,10 +84,10 @@ class VolumeRenderer(torch.nn.Module):
             ) 
 
             # TODO (1.5): Render (color) features using weights
-            pass
+            feature = self._aggregate(weights.unsqueeze(-1),feature.view(weights.shape[0],weights.shape[1],3))
 
             # TODO (1.5): Render depth map
-            pass
+            depth = self._aggregate(weights,depth_values)
 
             # Return
             cur_out = {
@@ -115,6 +121,7 @@ class SphereTracingRenderer(torch.nn.Module):
         self.near = cfg.near
         self.far = cfg.far
         self.max_iters = cfg.max_iters
+        self.eps = 1
     
     def sphere_tracing(
         self,
@@ -137,7 +144,19 @@ class SphereTracingRenderer(torch.nn.Module):
         #   in order to compute intersection points of rays with the implicit surface
         # 2) Maintain a mask with the same batch dimension as the ray origins,
         #   indicating which points hit the surface, and which do not
-        pass
+        N = origins.shape[0]
+        t=torch.zeros((N,1)).to(origins.device)
+        p=origins
+        # points = []
+        # mask = []
+
+        for i in range(self.max_iters):
+            f_p = implicit_fn(p)
+            mask = abs(f_p) <= self.eps
+            t += f_p
+            p = origins + t * directions
+        mask = mask.to(origins.device)
+        return p,mask
 
     def forward(
         self,
@@ -187,7 +206,32 @@ class SphereTracingRenderer(torch.nn.Module):
 
 def sdf_to_density(signed_distance, alpha, beta):
     # TODO (Q7): Convert signed distance to density with alpha, beta parameters
-    pass
+
+    density = torch.where(
+            signed_distance > 0,
+            0.5 * torch.exp(-signed_distance / beta),
+            1 - 0.5 * torch.exp(signed_distance / beta),
+        ) * alpha
+    #Q8.3
+    return density
+ 
+
+def sdf_to_density_neus(signed_distance,s):
+    # TODO (Q7): Convert signed distance to density with alpha, beta parameters
+    density = s * torch.exp(-signed_distance*s)
+    density = density/((1+torch.exp(-signed_distance*s)) ** 2)
+    #Q8.3
+    return density.to(signed_distance.device)
+
+class SingleVarianceNetwork(torch.nn.Module):
+    def __init__(self, init_val=0.3):
+        super(SingleVarianceNetwork, self).__init__()
+        self.register_parameter('variance', torch.nn.Parameter(torch.tensor(init_val)))
+
+    def forward(self, x):
+        temp = torch.ones([len(x), 1]).to(self.variance.device)
+        s = temp * torch.exp(self.variance * 10.0)
+        return s
 
 class VolumeSDFRenderer(VolumeRenderer):
     def __init__(
@@ -202,6 +246,9 @@ class VolumeSDFRenderer(VolumeRenderer):
         self.beta = cfg.beta
 
         self.cfg = cfg
+        self.deviation_network = SingleVarianceNetwork()
+
+
 
     def forward(
         self,
@@ -214,7 +261,6 @@ class VolumeSDFRenderer(VolumeRenderer):
 
         # Process the chunks of rays.
         chunk_outputs = []
-
         for chunk_start in range(0, B, self._chunk_size):
             cur_ray_bundle = ray_bundle[chunk_start:chunk_start+self._chunk_size]
 
@@ -224,7 +270,10 @@ class VolumeSDFRenderer(VolumeRenderer):
 
             # Call implicit function with sample points
             distance, color = implicit_fn.get_distance_color(cur_ray_bundle.sample_points)
-            density = None # TODO (Q7): convert SDF to density
+            # density = sdf_to_density(distance, self.cfg.alpha, self.cfg.beta) # TODO (Q7): convert SDF to density
+            s = self.deviation_network(torch.zeros([1, 3]))[:, :1].clip(1e-6, 1e6) 
+            s = s.expand(distance.shape[0], 1).to(distance.device)
+            density = sdf_to_density_neus(distance,s)
 
             # Compute length of each ray segment
             depth_values = cur_ray_bundle.sample_lengths[..., 0]
@@ -246,7 +295,7 @@ class VolumeSDFRenderer(VolumeRenderer):
 
             # Compute color
             color = self._aggregate(
-                weights,
+                weights.unsqueeze(-1),
                 color.view(-1, n_pts, color.shape[-1])
             )
 

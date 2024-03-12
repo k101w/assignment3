@@ -38,7 +38,7 @@ from dataset import (
 )
 from render_functions import render_geometry
 from render_functions import render_points_with_save
-
+import pdb
 
 # Model class containing:
 #   1) Implicit function defining the scene
@@ -233,7 +233,9 @@ def train_points(
 
             # Get distances and enforce point cloud loss
             distances, gradients = model.implicit_fn.get_distance_and_gradient(points)
-            loss = None # TODO (Q6): Point cloud SDF loss on distances
+            loss =  torch.abs(distances).mean()
+            #loss = sphere_loss(distances,points)
+            # TODO (Q6): Point cloud SDF loss on distances
             point_loss = loss
 
             # Sample random points in bounding box
@@ -243,6 +245,7 @@ def train_points(
 
             # Get sdf gradients and enforce eikonal loss
             eikonal_distances, eikonal_gradients = model.implicit_fn.get_distance_and_gradient(eikonal_points)
+
             loss += torch.exp(-1e2 * torch.abs(eikonal_distances)).mean() * cfg.training.inter_weight
             loss += eikonal_loss(eikonal_gradients) * cfg.training.eikonal_weight # TODO (Q6): Implement eikonal loss
 
@@ -280,7 +283,7 @@ def train_points(
                     model, create_surround_cameras(3.0, n_poses=20, up=(0.0, 1.0, 0.0), focal_length=2.0),
                     cfg.data.image_size, file_prefix='eikonal', thresh=0.002,
                 )
-                imageio.mimsave('images/part_6.gif', [np.uint8(im * 255) for im in test_images])
+                imageio.mimsave(f'images/part_6.gif', [np.uint8(im * 255) for im in test_images])
             except Exception as e:
                 print("Empty mesh")
                 pass
@@ -357,6 +360,7 @@ def train_images(
 
             # Color loss
             loss = torch.mean(torch.square(rgb_gt - out['color']))
+    
             image_loss = loss
 
             # Sample random points in bounding box
@@ -405,14 +409,14 @@ def train_images(
                 model, create_surround_cameras(4.0, n_poses=20, up=(0.0, 0.0, 1.0), focal_length=2.0),
                 cfg.data.image_size, file_prefix='volsdf'
             )
-            imageio.mimsave('images/part_7.gif', [np.uint8(im * 255) for im in test_images])
+            imageio.mimsave(f'images/part_7_{cfg.renderer.alpha}_{cfg.renderer.beta}.gif', [np.uint8(im * 255) for im in test_images])
 
             try:
                 test_images = render_geometry(
                     model, create_surround_cameras(4.0, n_poses=20, up=(0.0, 0.0, 1.0), focal_length=2.0),
                     cfg.data.image_size, file_prefix='volsdf_geometry'
                 )
-                imageio.mimsave('images/part_7_geometry.gif', [np.uint8(im * 255) for im in test_images])
+                imageio.mimsave(f'images/part_7_geometry_{cfg.renderer.alpha}_{cfg.renderer.beta}.gif', [np.uint8(im * 255) for im in test_images])
             except Exception as e:
                 print("Empty mesh")
                 pass

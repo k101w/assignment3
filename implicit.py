@@ -3,7 +3,7 @@ import torch.nn.functional as F
 from torch import autograd
 
 from ray_utils import RayBundle
-
+import pdb
 
 # Sphere SDF class
 class SphereSDF(torch.nn.Module):
@@ -125,6 +125,8 @@ class SDFVolume(torch.nn.Module):
     def forward(self, ray_bundle):
         sample_points = ray_bundle.sample_points.view(-1, 3)
         depth_values = ray_bundle.sample_lengths[..., 0]
+        #TODO:
+        # depth_values = depth_values/depth_values.max()
         deltas = torch.cat(
             (
                 depth_values[..., 1:] - depth_values[..., :-1],
@@ -132,11 +134,9 @@ class SDFVolume(torch.nn.Module):
             ),
             dim=-1,
         ).view(-1, 1)
-
         # Transform SDF to density
         signed_distance = self.sdf(ray_bundle.sample_points)
         density = self._sdf_to_density(signed_distance)
-
         # Outputs
         if self.rainbow:
             base_color = torch.clamp(
@@ -246,7 +246,7 @@ class MLPWithInputSkips(torch.nn.Module):
         self,
         n_layers: int,
         input_dim: int,
-        output_dim: int,
+        # output_dim: int,
         skip_dim: int,
         hidden_dim: int,
         input_skips,
@@ -298,7 +298,75 @@ class NeuralRadianceField(torch.nn.Module):
         embedding_dim_xyz = self.harmonic_embedding_xyz.output_dim
         embedding_dim_dir = self.harmonic_embedding_dir.output_dim
 
-        pass
+        self.xyz_mlp = MLPWithInputSkips(cfg.n_layers_xyz,embedding_dim_xyz,embedding_dim_xyz,cfg.n_hidden_neurons_xyz,cfg.append_xyz)
+        self.density_mlp = torch.nn.Sequential(torch.nn.Linear(cfg.n_hidden_neurons_xyz,1),torch.nn.ReLU())
+        self.feature_mlp = torch.nn.Sequential(torch.nn.Linear(cfg.n_hidden_neurons_xyz,cfg.n_hidden_neurons_xyz),torch.nn.ReLU())
+        self.rgb_mlp = torch.nn.Sequential(torch.nn.Linear(embedding_dim_dir+cfg.n_hidden_neurons_xyz,cfg.n_hidden_neurons_dir),
+                                            torch.nn.ReLU(),
+                                            torch.nn.Linear(cfg.n_hidden_neurons_dir,3),
+                                            torch.nn.Sigmoid())
+
+        self.f2r_mlp = torch.nn.Sequential(torch.nn.Linear(cfg.n_hidden_neurons_xyz,cfg.n_hidden_neurons_dir),
+                                            torch.nn.ReLU(),
+                                            torch.nn.Linear(cfg.n_hidden_neurons_dir,3),
+                                            torch.nn.Sigmoid())
+    
+    def forward(self,ray_bundle,use_view=True):
+        pos = ray_bundle.sample_points
+        dir = ray_bundle.directions
+        em_pos = self.harmonic_embedding_xyz(pos)
+        em_dir = self.harmonic_embedding_dir(dir)
+        o1 = self.xyz_mlp(em_pos,em_pos)
+        density = self.density_mlp(o1)
+        feature = self.feature_mlp(o1)
+        if use_view:
+            cat_dir = torch.cat([feature,em_dir.unsqueeze(1).repeat(1,feature.shape[1],1)],dim=-1)
+            rgb = self.rgb_mlp(cat_dir)
+        else:
+            rgb = self.f2r_mlp(feature)
+
+        return {'density': density, 'feature': rgb}
+
+
+# class NeuralRadianceField(torch.nn.Module):
+#     def __init__(
+#         self,
+#         cfg,
+#     ):
+#         super().__init__()
+
+#         self.harmonic_embedding_xyz = HarmonicEmbedding(3, cfg.n_harmonic_functions_xyz)
+#         self.harmonic_embedding_dir = HarmonicEmbedding(3, cfg.n_harmonic_functions_dir)
+
+#         embedding_dim_xyz = self.harmonic_embedding_xyz.output_dim
+#         embedding_dim_dir = self.harmonic_embedding_dir.output_dim
+
+#         self.xyz_mlp = MLPWithInputSkips(cfg.n_layers_xyz,embedding_dim_xyz,embedding_dim_xyz,cfg.n_hidden_neurons_xyz,cfg.append_xyz)
+#         self.sigma_mlp = torch.nn.Sequential(torch.nn.Linear(cfg.n_hidden_neurons_xyz,1),torch.nn.ReLU())
+#         self.feature_mlp = torch.nn.Sequential(torch.nn.Linear(cfg.n_hidden_neurons_xyz,cfg.n_hidden_neurons_xyz),torch.nn.ReLU())
+#         self.rgb_mlp = torch.nn.Sequential(torch.nn.Linear(embedding_dim_dir+cfg.n_hidden_neurons_xyz,cfg.n_hidden_neurons_dir),
+#                                             torch.nn.ReLU(),
+#                                             torch.nn.Linear(cfg.n_hidden_neurons_dir,3),
+#                                             torch.nn.Sigmoid())
+
+#         self.f2r_mlp = torch.nn.Sequential(torch.nn.Linear(cfg.n_hidden_neurons_xyz,cfg.n_hidden_neurons_dir),
+#                                             torch.nn.ReLU(),
+#                                             torch.nn.Linear(cfg.n_hidden_neurons_dir,3),
+#                                             torch.nn.Sigmoid())
+#     def forward(self,ray_bundle):
+#         pos = ray_bundle.sample_points
+#         dir = ray_bundle.directions
+#         em_pos = self.harmonic_embedding_xyz(pos)
+#         em_dir = self.harmonic_embedding_dir(dir)
+#         o1 = self.xyz_mlp(em_pos,em_pos)
+#         density = self.sigma_mlp(o1)
+#         feature = self.feature_mlp(o1)
+
+#         cat_dir = torch.cat([feature,em_dir.unsqueeze(1).repeat(1,feature.shape[1],1)],dim=-1)
+#         rgb = self.rgb_mlp(cat_dir)
+
+
+#         return {'density': density, 'feature': rgb}
 
 
 class NeuralSurface(torch.nn.Module):
@@ -310,6 +378,21 @@ class NeuralSurface(torch.nn.Module):
         # TODO (Q6): Implement Neural Surface MLP to output per-point SDF
         # TODO (Q7): Implement Neural Surface MLP to output per-point color
 
+        self.harmonic_embedding_dis = HarmonicEmbedding(3, cfg.n_harmonic_functions_xyz)
+        embedding_dim_distance = self.harmonic_embedding_dis.output_dim
+        self.distance_mlp = MLPWithInputSkips(cfg.n_layers_distance,embedding_dim_distance,embedding_dim_distance,cfg.n_hidden_neurons_distance,cfg.append_distance)
+        self.distance_final = torch.nn.Sequential(torch.nn.Linear(cfg.n_hidden_neurons_distance,1))
+
+        self.color_mlp = MLPWithInputSkips(cfg.n_layers_color,cfg.n_hidden_neurons_distance,cfg.n_hidden_neurons_distance,cfg.n_hidden_neurons_color,cfg.append_color)
+        # self.color_final = torch.nn.Sequential(torch.nn.Linear(embedding_dim_distance+cfg.n_hidden_neurons_color,cfg.n_hidden_neurons_color),
+        #                                     torch.nn.ReLU(),
+        #                                     torch.nn.Linear(cfg.n_hidden_neurons_color,3),
+        #                                     torch.nn.Sigmoid())
+
+        self.dis_color_final = torch.nn.Sequential(
+                                    torch.nn.Linear(cfg.n_hidden_neurons_color,3),
+                                    torch.nn.Sigmoid())
+     
     def get_distance(
         self,
         points
@@ -320,8 +403,11 @@ class NeuralSurface(torch.nn.Module):
             distance: N X 1 Tensor, where N is number of input points
         '''
         points = points.view(-1, 3)
-        pass
-    
+        emp = self.harmonic_embedding_dis(points)
+        o = self.distance_mlp(emp,emp)
+        dis = self.distance_final(o)
+        return dis
+
     def get_color(
         self,
         points
@@ -332,7 +418,13 @@ class NeuralSurface(torch.nn.Module):
             distance: N X 3 Tensor, where N is number of input points
         '''
         points = points.view(-1, 3)
-        pass
+        emp = self.harmonic_embedding_dis(points)
+        o = self.distance_mlp(emp,emp)
+        rgb = self.dis_color_final(o)
+        # o1 = self.color_mlp(emp,emp)
+        # o2 = torch.cat([emp,o1],dim=-1)
+        # rgb = self.color_final(o2)
+        return rgb
     
     def get_distance_color(
         self,
@@ -345,6 +437,15 @@ class NeuralSurface(torch.nn.Module):
         You may just implement this by independent calls to get_distance, get_color
             but, depending on your MLP implementation, it maybe more efficient to share some computation
         '''
+        points = points.view(-1, 3)
+        emp = self.harmonic_embedding_dis(points)
+        o = self.distance_mlp(emp,emp)
+        dis = self.distance_final(o)
+        o1 = self.color_mlp(o,o)
+        color = self.dis_color_final(o1)
+        # color = self.dis_color_final(o)
+        return dis,color
+
         
     def forward(self, points):
         return self.get_distance(points)

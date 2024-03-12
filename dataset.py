@@ -88,6 +88,7 @@ def get_nerf_datasets(
         # Automatically download the data files if missing.
         download_data((dataset_name,), data_root=data_root)
 
+    print(cameras_path)
     train_data = torch.load(cameras_path)
     n_cameras = train_data["cameras"]["R"].shape[0]
 
@@ -121,6 +122,9 @@ def get_nerf_datasets(
     ]
 
     train_idx, val_idx, test_idx = train_data["split"]
+    #TODO:
+    train_idx = torch.arange(20)
+    print(train_idx)
 
     train_dataset, val_dataset, test_dataset = [
         ListDataset(

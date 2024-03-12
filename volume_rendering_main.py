@@ -4,6 +4,7 @@ import warnings
 import hydra
 import numpy as np
 import torch
+torch.cuda.set_device(2)
 import tqdm
 import imageio
 
@@ -34,8 +35,8 @@ from dataset import (
     get_nerf_datasets,
     trivial_collate,
 )
-
-
+from render_functions import render_points
+import pdb
 # Model class containing:
 #   1) Implicit volume defining the scene
 #   2) Sampling scheme which generates sample points along rays
@@ -96,20 +97,21 @@ def render_images(
         xy_grid = get_pixels_from_image(image_size, camera) # TODO (Q1.3): implement in ray_utils.py
         ray_bundle = get_rays_from_pixels(xy_grid, image_size, camera) # TODO (Q1.3): implement in ray_utils.py
 
-        # TODO (Q1.3): Visualize xy grid using vis_grid
-        if cam_idx == 0 and file_prefix == '':
-            pass
+        # # TODO (Q1.3): Visualize xy grid using vis_grid
+        # if cam_idx == 0 and file_prefix == '':
+        #     xy_vis = vis_grid(xy_grid, image_size)
+        #     plt.imsave(f'images/1_1_xy.png',xy_vis)
 
-        # TODO (Q1.3): Visualize rays using vis_rays
-        if cam_idx == 0 and file_prefix == '':
-            pass
+        # # TODO (Q1.3): Visualize rays using vis_rays
+        # if cam_idx == 0 and file_prefix == '':
+        #     rays_vis = vis_rays(ray_bundle, image_size)
+        #     plt.imsave(f'images/1_1_rays.png',rays_vis)            
         
         # TODO (Q1.4): Implement point sampling along rays in sampler.py
-        pass
-
-        # TODO (Q1.4): Visualize sample points as point cloud
-        if cam_idx == 0 and file_prefix == '':
-            pass
+        model.sampler.forward(ray_bundle)
+        # # TODO (Q1.4): Visualize sample points as point cloud
+        # if cam_idx == 0 and file_prefix == '':
+        #     render_points(f'images/1_4.png', ray_bundle.sample_points.reshape(-1,3).unsqueeze(0),device = device)
 
         # TODO (Q1.5): Implement rendering in renderer.py
         out = model(ray_bundle)
@@ -124,7 +126,22 @@ def render_images(
 
         # TODO (Q1.5): Visualize depth
         if cam_idx == 2 and file_prefix == '':
-            pass
+            depth = out['depth']/ out['depth'].max()
+            depth_image = np.array(
+            depth.view(
+                image_size[1], image_size[0]
+                ).detach().cpu()
+            )
+            plt.imsave(
+                f'images/1_5_depth.png',
+                depth_image
+            )
+            plt.imsave(
+                f'images/1_5_image.png',
+                image
+            )
+            
+
 
         # Save
         if save:
@@ -184,7 +201,7 @@ def train(
 
     # Train
     t_range = tqdm.tqdm(range(cfg.training.num_epochs))
-
+    criteria = torch.nn.MSELoss()
     for epoch in t_range:
         for iteration, batch in enumerate(train_dataloader):
             image, camera, camera_idx = batch[0].values()
@@ -200,7 +217,7 @@ def train(
             out = model(ray_bundle)
 
             # TODO (Q2.2): Calculate loss
-            loss = None
+            loss = criteria(out['feature'],rgb_gt)
 
             # Backprop
             optimizer.zero_grad()
@@ -299,6 +316,7 @@ def train_nerf(
     )
 
     # Run the main training loop.
+    criteria = torch.nn.MSELoss()
     for epoch in range(start_epoch, cfg.training.num_epochs):
         t_range = tqdm.tqdm(enumerate(train_dataloader))
 
@@ -320,9 +338,9 @@ def train_nerf(
             out = model(ray_bundle)
 
             # TODO (Q3.1): Calculate loss
-            loss = None
+            loss = criteria(out['feature'],rgb_gt)
 
-            # Take the training step.
+            # Take the training step.``
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -359,7 +377,7 @@ def train_nerf(
                     model, create_surround_cameras(4.0, n_poses=20, up=(0.0, 0.0, 1.0), focal_length=2.0),
                     cfg.data.image_size, file_prefix='nerf'
                 )
-                imageio.mimsave('images/part_3.gif', [np.uint8(im * 255) for im in test_images])
+                imageio.mimsave(f'images/part_8_2_1.gif', [np.uint8(im * 255) for im in test_images])
 
 
 @hydra.main(config_path='./configs', config_name='sphere')
